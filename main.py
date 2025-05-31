@@ -5,7 +5,7 @@ from statistics import NormalDist
 import copy
 import pandas as pd
 from itertools import islice
-
+import statistics
 # Black-Scholes model for European options pricing
 class BlackScholes:
     def __init__(self, s0, k, t, iv, r):
@@ -54,14 +54,14 @@ class BlackScholes:
         return (self.strike * self.discount_factor() * norm_d2) - (self.stock_price * norm_d1)
 
     # Numerical approximation of call delta
-    def call_delta(self):
-        term2 = BlackScholes(self.stock_price + 1, self.strike, self.years, self.implied_vol, self.interest_rate)
-        return term2.call_price() - self.call_price()
+    def call_delta(self, h=0.01):
+        bumped = BlackScholes(self.stock_price + h, self.strike, self.years, self.implied_vol, self.interest_rate)
+        return (bumped.call_price() - self.call_price())/h
 
     # Numerical approximation of put delta
-    def put_delta(self):
-        term2 = BlackScholes(self.stock_price + 1, self.strike, self.years, self.implied_vol, self.interest_rate)
-        return term2.put_price() - self.put_price()
+    def put_delta(self, h=0.01):
+        bumped = BlackScholes(self.stock_price + h, self.strike, self.years, self.implied_vol, self.interest_rate)
+        return (bumped.put_price() - self.put_price()) / h
 
 
 # Represents a stock position
@@ -72,9 +72,9 @@ class StockPosition:
         self.market_value = price * quantity
 
     # Numerical approximation of delta (change in value with $1 price move)
-    def delta(self):
-        term2 = StockPosition(self.price + 1, self.quantity)
-        return term2.market_value - self.market_value
+    def delta(self, h=0.01):
+        bumped = StockPosition(self.price + h, self.quantity)
+        return (bumped.market_value - self.market_value) / h
 
 
 
@@ -149,6 +149,7 @@ class DeltaHedgeSim:
         for tau, price in islice(stock_path.items(), 1, None):
             hedge = DeltaHedge(price, self.option.strike, tau, self.option.implied_vol, self.option.interest_rate, points[-1].stock_position.delta())
             points.append(hedge)
+            
 
         # Final adjustment at expiration
         last = list(stock_path.values())[-1]
@@ -158,23 +159,27 @@ class DeltaHedgeSim:
 
 
 # Set parameters and run the simulation
-years = 0.2
-sim = DeltaHedgeSim(100, 105, years, 0.3, 0.0412)
-n_steps = int(years * 504)
+years = 0.05
+sim = DeltaHedgeSim(100, 100, years, 0.2, 0.0415)
+n_steps = int(years * 252)
 hedges, stock_path = sim.simulate(n_steps)
 
+def get_pl(hedges):
+    total_cashflow = 0
+    for h in hedges:
+        total_cashflow += h.cash_flow
+    
+    option_payout = sim.premium_received - (hedges[-1].option.call_price() * 100)
+    start_stock_price = hedges[0].option.stock_price
+    starting_cost = -hedges[0].cash_flow
+    pl = total_cashflow + option_payout
+    return pl, starting_cost, option_payout, total_cashflow
 # Summarize the results
 res = []
-total_cashflow = 0
 for h in hedges:
     res.append(h.display_form())
-    total_cashflow += h.cash_flow
 
-option_payout = sim.premium_received - (hedges[-1].option.call_price() * 100)
-start_stock_price = hedges[0].option.stock_price
-starting_cost = -hedges[0].cash_flow + sim.premium_received
-pl = total_cashflow + option_payout
-
+pl, starting_cost, option_payout, total_cashflow = get_pl(hedges)
 # Formats title with hyphens
 def formatted_title(title, char='-'):
     star_len = int((30 - len(title)) / 2)
@@ -201,5 +206,48 @@ print(f"Return on Cost: {pl / starting_cost*100:.2f}%")
 
 # Display results
 df = pd.DataFrame(res)
-df.head()
+df = df.head(5)
+print(df)
 df.style.hide(axis='index')
+
+# Display simulated path
+plt.figure(figsize=(12, 5))
+plt.title("Stock Path")
+plt.plot(stock_path.keys(), stock_path.values())
+plt.gca().invert_xaxis()
+plt.grid(True)
+plt.xlabel("Years to Expiry")
+plt.ylabel("Stock Price")
+plt.axhline(sim.option.stock_price, color='k', linestyle='--')
+plt.axhline(sim.option.strike, color='gold', linestyle='--')
+
+
+pls = []
+starting_cost = 0
+n_sims = 20000
+for i in range(n_sims + 1):
+    if i % 2000 == 0:
+        print(f"\rSim {i}/{n_sims}", end='')
+    hedges, stock_path = sim.simulate(n_steps)
+    pl, starting_cost, option_payout, total_cashflow = get_pl(hedges)
+    pls.append(pl)
+print("\nSimulation Complete.")
+pls = np.array(pls)
+average_pl = np.mean(pls)
+print(formatted_title("RESULTS"))
+print(f"Starting Cost: ${starting_cost:.2f}")
+pl_perc = average_pl / starting_cost * 100
+print(f"Average P/L: ${average_pl:.2f} ({pl_perc:.2f}%)")
+multiplier = 1 / sim.option.years
+annual_pl = average_pl * multiplier
+annual_pl_perc = pl_perc * multiplier
+print(f"Annualized P/L: ${annual_pl:.2f} ({annual_pl_perc:.2f}%)")
+print(f"Time to Expiry: {sim.option.years} years / {int(sim.option.years * 365)} days")
+print(f"Amount of Rehedges: {len(hedges)-1}")
+plt.figure(figsize=(12, 5))
+plt.title("OTM Delta Hedge Distribution of Payouts")
+plt.hist(pls, bins=50, edgecolor='k')
+pl_color = "lightgreen" if average_pl > 0 else "red"
+plt.axvline(average_pl, color=pl_color, linestyle='--')
+plt.axvline(0, color='k', linestyle='--')
+plt.grid(True)
